@@ -1,163 +1,113 @@
-use core::panic;
-use std::fs::{self};
-
-// d - e -> dictionary pair
-// l - e -> list pair
-// i - e -> interger pair
-
 #[derive(Debug, Clone)]
-struct FileInfo {
-    length: u32,
-    path: Option<String>,
+pub enum BObject {
+    Int(i64),
+    Str(Vec<u8>),
+    List(Vec<BObject>),
+    Dict(Vec<(String, BObject)>),
 }
 
-#[derive(Debug, Clone)]
-pub struct Info {
-    announce: Option<String>,
-    announce_list: Vec<String>,
-    comment: Option<String>,
-    created_by: Option<String>,
-    creation_date: Option<String>,
-    encoding: Option<String>,
-    info: Vec<FileInfo>,
-    name: Option<String>,
-    piece_length: Option<u32>,
-    pieces: Vec<u8>,
-    url_list: Option<String>,
+pub struct Parser<'a> {
+    pub data: &'a [u8],
+    pub pos: usize,
+    pub info_range: Option<(usize, usize)>,
 }
 
-pub fn decode(file_path: String) -> Info {
-    let mut dict = Info {
-        announce: None,
-        announce_list: Vec::new(),
-        comment: None,
-        created_by: None,
-        creation_date: None,
-        encoding: None,
-        info: Vec::new(),
-        name: None,
-        piece_length: None,
-        pieces: Vec::new(),
-        url_list: None,
-    };
-
-    let file = match fs::read(file_path) {
-        Ok(file) => file,
-        Err(e) => panic!("Failed to open file: {e:?}"),
-    };
-    let file_len = file.len();
-
-    let mut start: usize = 0;
-    let mut i: usize = 0;
-    let mut prev: Vec<&str> = Vec::new();
-    while i < file_len {
-        let &byte = &file[i];
-        if byte.is_ascii_digit() {
-            start = i;
-            while i < file_len && file[i].is_ascii_digit() {
-                i += 1;
-            }
-            i -= 1;
-        } else if byte == b'i' {
-            if !prev.is_empty() {
-                let &prev_field = prev.last().unwrap();
-                match prev_field {
-                    "length" => {
-                        start = i + 1;
-                        while file[i] != b'e' {
-                            i += 1;
-                        }
-                        i -= 1;
-                        if start >= i {
-                            i = start;
-                            continue;
-                        }
-                        let field = str::from_utf8(&file[start..i]).unwrap();
-                        dict.info.push(FileInfo {
-                            length: match field.to_string().parse::<u32>() {
-                                Ok(l) => l,
-                                Err(e) => panic!("Unable to parse '{field}': {e:?}"),
-                            },
-                            path: None,
-                        });
-                    }
-                    "creation date" => {
-                        start = i + 1;
-                        while file[i] != b'e' {
-                            i += 1;
-                        }
-                        i -= 1;
-                        if start >= i {
-                            i = start;
-                            continue;
-                        }
-                        let field = str::from_utf8(&file[start..i]).unwrap();
-                        dict.creation_date = Some(field.to_string());
-                    }
-                    "piece length" => {
-                        start = i + 1;
-                        while file[i] != b'e' {
-                            i += 1;
-                        }
-                        i -= 1;
-                        if start >= i {
-                            i = start;
-                            continue;
-                        }
-                        let field = str::from_utf8(&file[start..i]).unwrap();
-                        dict.piece_length = match field.to_string().parse::<u32>() {
-                            Ok(pl) => Some(pl),
-                            Err(e) => panic!("Unable to parse '{field}': {e:?}"),
-                        }
-                    }
-                    _ => (),
-                }
-            }
-        } else if byte == b'e' {
-            start = i;
-            prev.pop();
-        } else if byte == b':' {
-            let content_len = match str::from_utf8(&file[start..i]) {
-                Ok(f) => match f.to_string().parse::<usize>() {
-                    Ok(len) => len,
-                    Err(e) => panic!("Error '{f}': {e:?}"),
-                },
-                Err(e) => panic!("Unable to parse: {e:?}"),
-            };
-            let field = match str::from_utf8(&file[i + 1..i + 1 + content_len as usize]) {
-                Ok(f) => f,
-                Err(e) => {
-                    println!("Unable to parse {e:?}");
-                    ""
-                }
-            };
-            if !prev.is_empty() {
-                let &prev_field = prev.last().unwrap();
-                match prev_field {
-                    "announce" => dict.announce = Some(field.to_string()),
-                    "announce-list" => dict.announce_list.push(field.to_string()),
-                    "comment" => dict.comment = Some(field.to_string()),
-                    "created by" => dict.created_by = Some(field.to_string()),
-                    "creation date" => dict.creation_date = Some(field.to_string()),
-                    "encoding" => dict.encoding = Some(field.to_string()),
-                    "path" => dict.info.last_mut().unwrap().path = Some(field.to_string()),
-                    "name" => dict.name = Some(field.to_string()),
-                    "url-list" => dict.url_list = Some(field.to_string()),
-                    "pieces" => {
-                        for &b in &file[i + 1..i + 1 + content_len] {
-                            dict.pieces.push(b);
-                        }
-                    }
-                    _ => (),
-                }
-            }
-            prev.push(field);
-            i += content_len;
-            start = i;
-        }
-        i += 1;
+impl<'a> Parser<'a> {
+    fn peek(&self) -> u8 {
+        self.data[self.pos]
     }
-    dbg!(dict.clone());
 
-    return dict;
+    fn advance(&mut self, n: usize) {
+        self.pos += n;
+    }
+
+    fn parse_int(&mut self) -> BObject {
+        self.advance(1);
+        let start = self.pos;
+        while self.peek() != b'e' {
+            self.advance(1);
+        }
+        let end = self.pos;
+        self.advance(1);
+        let n = str::from_utf8(&self.data[start..end])
+            .unwrap()
+            .parse::<i64>()
+            .unwrap();
+
+        BObject::Int(n)
+    }
+
+    fn parse_str(&mut self) -> BObject {
+        let start = self.pos;
+        while self.peek() != b':' {
+            self.advance(1);
+        }
+        let len: usize = str::from_utf8(&self.data[start..self.pos])
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        self.advance(1);
+
+        let bytes = self.data[self.pos..self.pos + len].to_vec();
+        self.advance(len);
+
+        BObject::Str(bytes)
+    }
+
+    fn parse_list(&mut self) -> BObject {
+        self.advance(1);
+        let mut out = Vec::new();
+        while self.peek() != b'e' {
+            out.push(self.parse_value());
+        }
+        self.advance(1);
+        BObject::List(out)
+    }
+
+    pub fn parse_value(&mut self) -> BObject {
+        match self.peek() {
+            b'i' => self.parse_int(),
+            b'l' => self.parse_list(),
+            b'd' => self.parse_dict(),
+            b'0'..=b'9' => self.parse_str(),
+            _ => panic!("Invalid Bencode"),
+        }
+    }
+
+    fn parse_dict(&mut self) -> BObject {
+        self.advance(1);
+        let mut out = Vec::new();
+        while self.peek() != b'e' {
+            let key = match self.parse_str() {
+                BObject::Str(s) => String::from_utf8(s).unwrap(),
+                _ => unreachable!(),
+            };
+            if key == "info" {
+                let info_start = self.pos;
+                let val = self.parse_value();
+                let info_end = self.pos;
+                self.info_range = Some((info_start, info_end));
+                out.push((key, val));
+            } else {
+                let val = self.parse_value();
+                out.push((key, val));
+            }
+        }
+        self.advance(1);
+        BObject::Dict(out)
+    }
+
+}
+
+pub fn get_value(dict: &BObject, key: String) -> Option<BObject> {
+    if let BObject::Dict(root) = dict {
+        for (k, v) in root {
+            if *k == key
+            {
+                return Some(v.clone());
+            }
+        }
+    }
+    None
 }
