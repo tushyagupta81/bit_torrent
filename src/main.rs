@@ -1,4 +1,5 @@
 mod bencode;
+mod network;
 mod tracker;
 
 use crate::tracker::{get_peers};
@@ -6,8 +7,9 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
-    let torrent_dir = "./torrents";
-    process_torrent_dir(torrent_dir);
+    get_peers("./torrents/test.torrent".to_string());
+    // let torrent_dir = "./torrents";
+    // process_torrent_dir(torrent_dir);
 }
 
 fn process_torrent_dir(dir: &str) {

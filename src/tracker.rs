@@ -1,10 +1,12 @@
 use core::panic;
 
 use crate::bencode::{BObject, Parser, get_value};
+use crate::network::{request_peers_http, request_peers_udp};
 use rand::Rng;
+use sha1::{Digest, Sha1};
 
 pub fn get_peers(file_path: String) {
-    let data = std::fs::read(file_path).unwrap();
+    let data = std::fs::read(&file_path).unwrap();
     let mut parser = Parser {
         data: &data,
         pos: 0,
@@ -16,7 +18,6 @@ pub fn get_peers(file_path: String) {
     let hash;
     if let Some((s, e)) = parser.info_range {
         let info_bytes = &parser.data[s..e]; // EXACT bencoded slice
-        use sha1::{Digest, Sha1};
         let mut hasher = Sha1::new();
         hasher.update(info_bytes);
         hash = hasher.finalize();
@@ -24,16 +25,27 @@ pub fn get_peers(file_path: String) {
         panic!("Can't get info hash");
     }
 
-    let announce_url = match get_value(&_parsed, "announce".to_string()) {
-        Some(value) => {
-            if let BObject::Str(bytes) = value {
-                String::from_utf8_lossy(&bytes).to_string()
+    let mut announce_urls = Vec::new();
+
+    match get_value(&_parsed, "announce-list".to_string()) {
+        Some(items) => {
+            if let BObject::List(byte_list) = items {
+                for entry in byte_list {
+                    if let BObject::List(bl) = entry {
+                        for bytes in bl {
+                            if let BObject::Str(url) = bytes {
+                                announce_urls.push(String::from_utf8_lossy(&url).to_string());
+                            }
+                        }
+                    }
+                }
             } else {
                 panic!("Can't get tracker url");
             }
         }
         None => panic!("Can't get tracker url"),
     };
+
     let peer_id = gen_peer_id();
     let port = 6881;
     let downloaded = 0;
@@ -71,29 +83,55 @@ pub fn get_peers(file_path: String) {
     let event = "started";
     let numwant = 50;
 
-    let mut url = reqwest::Url::parse(&announce_url).unwrap();
+    for url in announce_urls {
+        // manually add info_hash and peer_id to avoid double encoding
+        let query = format!(
+            "info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&compact={}&event={}&numwant={}",
+            encode_binary(&hash),    // percent-encoded already
+            encode_binary(&peer_id), // percent-encoded already
+            port,
+            uploaded,
+            downloaded,
+            left,
+            compact,
+            event,
+            numwant
+        );
 
-    // manually add info_hash and peer_id to avoid double encoding
-    let mut query = format!(
-        "info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&compact={}&event={}&numwant={}",
-        encode_binary(&hash),    // percent-encoded already
-        encode_binary(&peer_id), // percent-encoded already
-        port,
-        uploaded,
-        downloaded,
-        left,
-        compact,
-        event,
-        numwant
-    );
+        // attach query to base URL
+        let full_url = format!("{}?{}", url, query);
 
-    // attach query to base URL
-    let full_url = format!("{}?{}", url, query);
-
-    if url.to_string().starts_with("http") {
-        request_peers(&full_url);
+        if url.to_string().starts_with("http") {
+            match request_peers_http(&full_url) {
+                Ok(_) => break,
+                Err(e) => println!("Error(http): {e}"),
+            }
+        } else if url.starts_with("udp:") {
+            // continue;
+            match request_peers_udp(
+                &url,
+                &compute_info_hash(&hash),
+                &peer_id,
+                left,
+                port,
+            ) {
+                Ok(_) => break,
+                Err(e) => println!("Error(udp): {e}"),
+            }
+        }
     }
-    dbg!(full_url);
+    println!("===== DONE {} =====", file_path);
+}
+
+fn compute_info_hash(data: &[u8]) -> [u8; 20] {
+    let mut hasher = Sha1::new();
+    hasher.update(data);
+
+    // This returns GenericArray<u8, 20>
+    let result = hasher.finalize();
+
+    // Convert to [u8; 20]
+    result.into()
 }
 
 fn gen_peer_id() -> [u8; 20] {
@@ -109,13 +147,4 @@ fn gen_peer_id() -> [u8; 20] {
 fn encode_binary(data: &[u8]) -> String {
     use url::form_urlencoded::byte_serialize;
     byte_serialize(data).collect()
-}
-
-fn request_peers(url: &String) {
-    let response = reqwest::blocking::get(url)
-        .expect("Failed to send request to tracker")
-        .bytes()
-        .expect("Failed to read response from tracker");
-
-    println!("Response from tracker: {response:?}");
 }
