@@ -1,11 +1,12 @@
 use core::panic;
+use std::error::Error;
 
 use crate::bencode::{BObject, Parser, get_value};
-use crate::network::{request_peers_http, request_peers_udp};
+use crate::network::{Peer, request_peers_http, request_peers_udp};
 use rand::Rng;
 use sha1::{Digest, Sha1};
 
-pub fn get_peers(file_path: String) {
+pub fn get_peers(file_path: String) -> Result<Vec<Peer>, Box<dyn Error>> {
     let data = std::fs::read(&file_path).unwrap();
     let mut parser = Parser {
         data: &data,
@@ -27,24 +28,28 @@ pub fn get_peers(file_path: String) {
 
     let mut announce_urls = Vec::new();
 
-    match get_value(&_parsed, "announce-list".to_string()) {
-        Some(items) => {
-            if let BObject::List(byte_list) = items {
-                for entry in byte_list {
-                    if let BObject::List(bl) = entry {
-                        for bytes in bl {
-                            if let BObject::Str(url) = bytes {
-                                announce_urls.push(String::from_utf8_lossy(&url).to_string());
-                            }
-                        }
+    if let Some(BObject::List(byte_list)) = get_value(&_parsed, "announce-list".to_string()) {
+        for entry in byte_list {
+            if let BObject::List(bl) = entry {
+                for bytes in bl {
+                    if let BObject::Str(url) = bytes {
+                        announce_urls.push(String::from_utf8_lossy(&url).to_string());
                     }
                 }
-            } else {
-                panic!("Can't get tracker url");
             }
         }
-        None => panic!("Can't get tracker url"),
-    };
+    } else {
+        match get_value(&_parsed, "announce".to_string()) {
+            Some(bytes) => {
+                if let BObject::Str(url) = bytes {
+                    announce_urls.push(String::from_utf8_lossy(&url).to_string());
+                } else {
+                    panic!("Can't get tracker url");
+                }
+            }
+            None => panic!("Can't get tracker url"),
+        };
+    }
 
     let peer_id = gen_peer_id();
     let port = 6881;
@@ -55,7 +60,7 @@ pub fn get_peers(file_path: String) {
         Some(info) => match get_value(&info, "length".to_string()) {
             Some(v) => {
                 if let BObject::Int(e) = v {
-                    left = e as u64;
+                    left = e;
                 } else {
                     panic!("Can't get bytes left")
                 }
@@ -72,7 +77,7 @@ pub fn get_peers(file_path: String) {
                             }
                         }
                     }
-                    left = sum as u64;
+                    left = sum;
                 }
                 None => panic!("Can't get bytes left"),
             },
@@ -103,24 +108,17 @@ pub fn get_peers(file_path: String) {
 
         if url.to_string().starts_with("http") {
             match request_peers_http(&full_url) {
-                Ok(_) => break,
-                Err(e) => println!("Error(http): {e}"),
+                Ok(peers) => return Ok(peers),
+                Err(e) => eprintln!("Error(http): {e}"),
             }
         } else if url.starts_with("udp:") {
-            // continue;
-            match request_peers_udp(
-                &url,
-                &compute_info_hash(&hash),
-                &peer_id,
-                left,
-                port,
-            ) {
-                Ok(_) => break,
-                Err(e) => println!("Error(udp): {e}"),
+            match request_peers_udp(&url, &compute_info_hash(&hash), &peer_id, left, port) {
+                Ok(peers) => return Ok(peers),
+                Err(e) => eprintln!("Error(udp): {e}"),
             }
         }
     }
-    println!("===== DONE {} =====", file_path);
+    Err("Can't get peers from any tracker".into())
 }
 
 fn compute_info_hash(data: &[u8]) -> [u8; 20] {

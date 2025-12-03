@@ -2,14 +2,14 @@ mod bencode;
 mod network;
 mod tracker;
 
-use crate::tracker::{get_peers};
+use crate::tracker::get_peers;
 use std::fs;
 use std::path::Path;
 
 fn main() {
-    get_peers("./torrents/test.torrent".to_string());
-    // let torrent_dir = "./torrents";
-    // process_torrent_dir(torrent_dir);
+    // get_peers("./torrents/sample.torrent".to_string());
+    let torrent_dir = "./torrents";
+    process_torrent_dir(torrent_dir);
 }
 
 fn process_torrent_dir(dir: &str) {
@@ -29,7 +29,12 @@ fn process_torrent_dir(dir: &str) {
             && ext == "torrent"
             && let Some(path_str) = file_path.to_str()
         {
-            get_peers(path_str.to_string());
+            println!("=== {path_str} ===");
+            match get_peers(path_str.to_string()) {
+                Ok(peers) => println!("{:?}", peers),
+                Err(e) => eprintln!("Error: {e}"),
+            }
+            println!("\n\n");
         }
     }
 }
