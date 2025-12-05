@@ -6,7 +6,7 @@ use crate::network::{Peer, request_peers_http, request_peers_udp};
 use rand::Rng;
 use sha1::{Digest, Sha1};
 
-pub fn get_peers(file_path: String) -> Result<Vec<Peer>, Box<dyn Error>> {
+pub fn get_peers(file_path: String) -> Result<(Vec<Peer>, [u8;20], i64, usize), Box<dyn Error>> {
     let data = std::fs::read(&file_path).unwrap();
     let mut parser = Parser {
         data: &data,
@@ -15,13 +15,14 @@ pub fn get_peers(file_path: String) -> Result<Vec<Peer>, Box<dyn Error>> {
     };
 
     let _parsed = parser.parse_value();
+    dbg!(&_parsed);
 
-    let hash;
+    let hash: [u8; 20];
     if let Some((s, e)) = parser.info_range {
         let info_bytes = &parser.data[s..e]; // EXACT bencoded slice
         let mut hasher = Sha1::new();
         hasher.update(info_bytes);
-        hash = hasher.finalize();
+        hash = hasher.finalize().into();
     } else {
         panic!("Can't get info hash");
     }
@@ -56,37 +57,63 @@ pub fn get_peers(file_path: String) -> Result<Vec<Peer>, Box<dyn Error>> {
     let downloaded = 0;
     let uploaded = 0;
     let left;
+    let piece_len;
+    let num_pieces;
     match get_value(&_parsed, "info".to_string()) {
-        Some(info) => match get_value(&info, "length".to_string()) {
-            Some(v) => {
-                if let BObject::Int(e) = v {
-                    left = e;
-                } else {
-                    panic!("Can't get bytes left")
+        Some(info) => {
+            match get_value(&info, "length".to_string()) {
+                Some(v) => {
+                    if let BObject::Int(e) = v {
+                        left = e;
+                    } else {
+                        panic!("Can't get bytes left")
+                    }
                 }
-            }
-            None => match get_value(&info, "files".to_string()) {
-                Some(f) => {
-                    let mut sum: i64 = 0;
-                    if let BObject::List(files) = f {
-                        for file in files {
-                            if let BObject::Dict(v) = file
-                                && let BObject::Int(len) = v[0].1
-                            {
-                                sum += len;
+                None => match get_value(&info, "files".to_string()) {
+                    Some(f) => {
+                        let mut sum: i64 = 0;
+                        if let BObject::List(files) = f {
+                            for file in files {
+                                if let BObject::Dict(v) = file
+                                    && let BObject::Int(len) = v[0].1
+                                {
+                                    sum += len;
+                                }
                             }
                         }
+                        left = sum;
                     }
-                    left = sum;
+                    None => panic!("Can't get bytes left"),
+                },
+            }
+            match get_value(&info, "piece length".to_string()) {
+                Some(v) => {
+                    if let BObject::Int(e) = v {
+                        piece_len = e;
+                    } else {
+                        panic!("Can't get piece length")
+                    }
                 }
-                None => panic!("Can't get bytes left"),
-            },
-        },
+                None => panic!("Can't get piece length"),
+            }
+            match get_value(&info, "pieces".to_string()) {
+                Some(v) => {
+                    if let BObject::Str(e) = v {
+                        num_pieces = e.len().div_ceil(20);
+                    } else {
+                        panic!("Can't get number of pieces")
+                    }
+                }
+                None => panic!("Can't get number of pieces"),
+            }
+        }
         None => panic!("Can't get info"),
     }
     let compact = 1;
     let event = "started";
     let numwant = 50;
+
+    // println!("{:?}", &hash);
 
     for url in announce_urls {
         // manually add info_hash and peer_id to avoid double encoding
@@ -108,12 +135,12 @@ pub fn get_peers(file_path: String) -> Result<Vec<Peer>, Box<dyn Error>> {
 
         if url.to_string().starts_with("http") {
             match request_peers_http(&full_url) {
-                Ok(peers) => return Ok(peers),
+                Ok(peers) => return Ok((peers, hash, piece_len, num_pieces)),
                 Err(e) => eprintln!("Error(http): {e}"),
             }
         } else if url.starts_with("udp:") {
-            match request_peers_udp(&url, &compute_info_hash(&hash), &peer_id, left, port) {
-                Ok(peers) => return Ok(peers),
+            match request_peers_udp(&url, &hash, &peer_id, left, port) {
+                Ok(peers) => return Ok((peers, hash, piece_len, num_pieces)),
                 Err(e) => eprintln!("Error(udp): {e}"),
             }
         }
@@ -132,7 +159,7 @@ fn compute_info_hash(data: &[u8]) -> [u8; 20] {
     result.into()
 }
 
-fn gen_peer_id() -> [u8; 20] {
+pub fn gen_peer_id() -> [u8; 20] {
     let mut id = *b"-RS0001-000000000000";
     let mut rng = rand::rng();
     for i in id.iter_mut().skip(8) {

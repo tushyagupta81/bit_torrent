@@ -39,9 +39,9 @@ fn parse_announce_response_peers(resp: &[u8]) -> Result<Vec<Peer>, String> {
 
 #[derive(Debug)]
 pub struct Peer {
-    ip: String,
+    pub ip: String,
     peer_id: Option<String>,
-    port: u16,
+    pub port: u16,
 }
 
 pub fn request_peers_http(url: &String) -> Result<Vec<Peer>, reqwest::Error> {
@@ -238,29 +238,4 @@ pub fn request_peers_udp(
     let peers = parse_announce_response_peers(&resp[..len])?;
 
     Ok(peers)
-}
-
-#[test]
-fn test_udp_peers() {
-    // let url = "udp://tracker.opentrackr.org:1337";
-    // let info_hash: [u8; 20] = [
-    //     0xD9, 0x84, 0xF6, 0x7A, 0xF9, 0x91, 0x7B, 0x21, 0x4C, 0xD8, 0xB6, 0x04, 0x8A, 0xB5, 0x62,
-    //     0x4C, 0x7D, 0xF6, 0xA0, 0x7A,
-    // ];
-    // let left = 19296724;
-    let url = "udp://tracker.leechers-paradise.org:6969";
-    let info_hash: [u8; 20] = [
-        0xDD, 0x82, 0x55, 0xEC, 0xDC, 0x7C, 0xA5, 0x5F, 0xB0, 0xBB, 0xF8, 0x13, 0x23, 0xD8, 0x70,
-        0x62, 0xDB, 0x1F, 0x6D, 0x1C,
-    ];
-    let left = 276445467;
-
-    let peer_id: [u8; 20] = *b"-RS0001-mPZyGsS6UA9i";
-    let port = 6881;
-    let _ = match request_peers_udp(url, &info_hash, &peer_id, left, port) {
-        Ok(_) => {}
-        Err(e) => {
-            println!("Error: {e}");
-        }
-    };
 }
