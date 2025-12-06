@@ -215,7 +215,7 @@ pub fn request_peers_udp(
         eprintln!("Announce respose length has to be atleast 20 bytes");
         return Err("Response too short".to_string());
     }
-    let (ann_action, ann_tid, _ann_interval, _ann_leechers, ann_seeders) =
+    let (ann_action, ann_tid, _ann_interval, ann_leechers, ann_seeders) =
         match parse_announce_response(&resp[..20]) {
             Ok(p) => p,
             Err(e) => {
@@ -234,6 +234,8 @@ pub fn request_peers_udp(
         eprintln!("Got back wrong action from tracker");
         return Err("Wrong action".to_string());
     }
+
+    println!("Seeders = {ann_seeders}, Leechers = {ann_leechers}");
 
     let peers = parse_announce_response_peers(&resp[..len])?;
 

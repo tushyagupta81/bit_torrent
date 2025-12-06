@@ -65,7 +65,7 @@ pub fn intitalize_peer_connections(
             continue;
         }
         // println!("Unchoke successful");
-        //
+
         let pieces_done_clone = Arc::clone(&pieces_done);
         let file_handles_clone = file_handles.to_vec(); // Arc inside handles is fine
         let piece_len = torrent.piece_len as usize;
@@ -84,15 +84,20 @@ pub fn intitalize_peer_connections(
             let ip_for_panic = ip_clone.clone();
             let result = std::panic::catch_unwind(move || {
                 let mut peer_conn = PeerConnection {
-                    ip: ip_clone,
+                    ip: ip_clone.clone(),
                     port: port_clone,
                     socket, // moved in
                     bitfield: bitfield_clone,
                 };
 
                 let mut old = None;
+                let mut retry = 0;
 
                 loop {
+                    if retry > 5 {
+                        eprintln!("Faulty peer {}, disconnecting", ip_clone);
+                        break;
+                    }
                     // Step 1: reserve piece
                     let piece_index_opt = {
                         let mut pd = pieces_done_clone.write().unwrap();
@@ -112,6 +117,7 @@ pub fn intitalize_peer_connections(
                     };
 
                     if let Some(piece_index) = piece_index_opt {
+                        // println!("Trying for piece {}", piece_index);
                         // Step 2: download piece outside lock
                         match get_piece_from_peer(
                             piece_index,
@@ -129,11 +135,10 @@ pub fn intitalize_peer_connections(
                                     eprintln!("Failed writing piece {}: {}", piece_index, e);
                                     let mut pd = pieces_done_clone.write().unwrap();
                                     pd[piece_index] = false; // release reservation
-                                    old = Some(piece_index);
                                     continue;
                                 }
                                 println!(
-                                    "Peer {} finished piece {}/{}",
+                                    "\t\t\t\t\tPeer {} finished piece {}/{}",
                                     peer_conn.ip,
                                     piece_index + 1,
                                     total_pieces
@@ -150,6 +155,7 @@ pub fn intitalize_peer_connections(
                                 let mut pd = pieces_done_clone.write().unwrap();
                                 pd[piece_index] = false; // release reservation
                                 old = Some(piece_index);
+                                retry += 1;
                                 continue;
                             }
                         }

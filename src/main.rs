@@ -8,7 +8,7 @@ mod tracker;
 use crate::download::download;
 
 fn main() {
-    download("./torrents/test.torrent".to_string())
+    download("./torrent_files/test_file.torrent".to_string())
     // let torrent_dir = "./torrents";
     // process_torrent_dir(torrent_dir);
 }
