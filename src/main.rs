@@ -1,4 +1,5 @@
 mod bencode;
+mod io;
 mod download;
 mod network;
 mod peers;

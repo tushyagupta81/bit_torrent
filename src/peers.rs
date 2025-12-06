@@ -1,4 +1,11 @@
+use crate::io::write_piece_to_files;
+use crate::{
+    download::FileHandle,
+    tracker::{Torrent, gen_peer_id},
+};
 use sha1::{Digest, Sha1};
+use std::sync::{Arc, RwLock};
+use std::thread;
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
@@ -14,10 +21,12 @@ pub struct PeerConnection {
 }
 
 pub fn intitalize_peer_connections(
-    peers: &[Peer],
-    info_hash: &[u8; 20],
-) -> Result<Vec<PeerConnection>, String> {
-    let mut valid_peers = Vec::new();
+    torrent: &Torrent,
+    file_handles: &[FileHandle],
+) -> Result<(), String> {
+    let peers = &torrent.peers;
+    let info_hash = &torrent.info_hash;
+    let pieces_done = Arc::new(RwLock::new(vec![false; torrent.num_pieces]));
     for peer in peers {
         println!("Trying peer {}", peer.ip);
         let addr: SocketAddr = format!("{}:{}", peer.ip, peer.port).parse().unwrap();
@@ -36,10 +45,9 @@ pub fn intitalize_peer_connections(
 
         let peer_id = gen_peer_id();
 
-        match handshake(&mut socket, info_hash, &peer_id) {
-            Ok(_) => {}
-            Err(_) => continue,
-        };
+        if handshake(&mut socket, info_hash, &peer_id).is_err() {
+            continue;
+        }
         // println!("Handshake successful");
 
         let has_pieces = match read_bitfield(&mut socket) {
@@ -48,30 +56,116 @@ pub fn intitalize_peer_connections(
         };
         // println!("Bitfield successful");
 
-        match interested(&mut socket) {
-            Ok(_) => {}
-            Err(_) => continue,
-        };
+        if interested(&mut socket).is_err() {
+            continue;
+        }
         // println!("Interested successful");
 
-        match read_unchoke(&mut socket) {
-            Ok(_) => {}
-            Err(_) => continue,
-        };
+        if read_unchoke(&mut socket).is_err() {
+            continue;
+        }
         // println!("Unchoke successful");
+        //
+        let pieces_done_clone = Arc::clone(&pieces_done);
+        let file_handles_clone = file_handles.to_vec(); // Arc inside handles is fine
+        let piece_len = torrent.piece_len as usize;
+        let pieces_clone = torrent.pieces.clone();
+        let total_pieces = torrent.num_pieces;
 
-        valid_peers.push(PeerConnection {
-            ip: peer.ip.clone(),
-            port: peer.port,
-            socket,
-            bitfield: has_pieces,
-        });
+        // clone peer data for the thread
+        let ip_clone = peer.ip.clone();
+        let port_clone = peer.port;
+        let bitfield_clone = has_pieces.clone();
+
         println!("Got peer {}", peer.ip);
-    }
-    Ok(valid_peers)
-}
 
-use crate::{network::Peer, tracker::gen_peer_id};
+        // spawn thread and catch panics
+        let _handle = thread::spawn(move || {
+            let ip_for_panic = ip_clone.clone();
+            let result = std::panic::catch_unwind(move || {
+                let mut peer_conn = PeerConnection {
+                    ip: ip_clone,
+                    port: port_clone,
+                    socket, // moved in
+                    bitfield: bitfield_clone,
+                };
+
+                let mut old = None;
+
+                loop {
+                    // Step 1: reserve piece
+                    let piece_index_opt = {
+                        let mut pd = pieces_done_clone.write().unwrap();
+                        let idx = pd
+                            .iter()
+                            .enumerate()
+                            .find(|(i, done)| {
+                                !**done
+                                    && peer_conn.bitfield.get(*i).copied().unwrap_or(false)
+                                    && (old.is_none() || *i != old.unwrap())
+                            })
+                            .map(|(i, _)| i);
+                        if let Some(i) = idx {
+                            pd[i] = true;
+                        } // reserve immediately
+                        idx
+                    };
+
+                    if let Some(piece_index) = piece_index_opt {
+                        // Step 2: download piece outside lock
+                        match get_piece_from_peer(
+                            piece_index,
+                            piece_len,
+                            &pieces_clone,
+                            &mut peer_conn,
+                        ) {
+                            Ok(piece_buf) => {
+                                if let Err(e) = write_piece_to_files(
+                                    &file_handles_clone,
+                                    piece_index,
+                                    piece_len,
+                                    &piece_buf,
+                                ) {
+                                    eprintln!("Failed writing piece {}: {}", piece_index, e);
+                                    let mut pd = pieces_done_clone.write().unwrap();
+                                    pd[piece_index] = false; // release reservation
+                                    old = Some(piece_index);
+                                    continue;
+                                }
+                                println!(
+                                    "Peer {} finished piece {}/{}",
+                                    peer_conn.ip,
+                                    piece_index + 1,
+                                    total_pieces
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "Peer {} failed downloading piece {}/{}: {}",
+                                    peer_conn.ip,
+                                    piece_index + 1,
+                                    total_pieces,
+                                    e
+                                );
+                                let mut pd = pieces_done_clone.write().unwrap();
+                                pd[piece_index] = false; // release reservation
+                                old = Some(piece_index);
+                                continue;
+                            }
+                        }
+                    } else {
+                        break; // no more pieces for this peer
+                    }
+                }
+            });
+
+            if let Err(err) = result {
+                eprintln!("Thread for peer {} panicked: {:?}", ip_for_panic, err);
+            }
+        });
+    }
+    Ok(())
+}
 
 fn read_message_non_block(socket: &mut TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
     let mut len_buf = [0u8; 4];
@@ -99,7 +193,7 @@ fn read_message(socket: &mut TcpStream) -> Result<(u8, Vec<u8>), String> {
             Ok((msg_id, payload)) => return Ok((msg_id, payload)),
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 retry += 1;
-                std::thread::sleep(Duration::from_millis(50));
+                thread::sleep(Duration::from_millis(50));
                 if retry > 1 {
                     return Err(format!("Failed reading message: {e}"));
                 }
@@ -200,8 +294,6 @@ pub fn get_piece_from_peer(
     let block_len = 16 * 1024;
 
     if peer.bitfield[piece_index] {
-        println!("Requesting piece {piece_index}");
-
         let piece_size = piece_len;
         let mut piece_buf = vec![0u8; piece_size];
 
@@ -241,14 +333,11 @@ pub fn get_piece_from_peer(
         }
 
         if verify_hash(&piece_buf, piece_index, pieces) {
-            println!("Piece {} passed hash check", piece_index);
             return Ok(piece_buf);
         } else {
             println!("Piece {} failed hash check", piece_index);
         }
     }
-
-    // send_request(&mut socket, piece_id, 0, 50);
 
     Err("Unable to get piece from peer".into())
 }

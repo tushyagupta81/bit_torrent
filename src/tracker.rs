@@ -9,7 +9,7 @@ use sha1::{Digest, Sha1};
 #[derive(Debug)]
 pub struct FileInfo {
     pub name: String,
-    pub size: i64,
+    pub size: u64,
 }
 
 #[derive(Debug)]
@@ -87,7 +87,7 @@ pub fn get_peers(file_path: String) -> Result<Torrent, Box<dyn Error>> {
                                 let file_name = String::from_utf8(name).unwrap();
                                 files_list.push(FileInfo {
                                     name: file_name,
-                                    size: e,
+                                    size: e as u64,
                                 });
                             }
                             None | Some(_) => {
@@ -120,7 +120,7 @@ pub fn get_peers(file_path: String) -> Result<Torrent, Box<dyn Error>> {
                                     }
                                     files_list.push(FileInfo {
                                         name: file_name.trim_matches('/').to_string(),
-                                        size,
+                                        size: size as u64,
                                     });
                                 }
                             }
