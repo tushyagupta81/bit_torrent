@@ -6,7 +6,23 @@ use crate::network::{Peer, request_peers_http, request_peers_udp};
 use rand::Rng;
 use sha1::{Digest, Sha1};
 
-pub fn get_peers(file_path: String) -> Result<(Vec<Peer>, [u8;20], i64, usize), Box<dyn Error>> {
+#[derive(Debug)]
+pub struct FileInfo {
+    pub name: String,
+    pub size: i64,
+}
+
+#[derive(Debug)]
+pub struct Torrent {
+    pub peers: Vec<Peer>,
+    pub info_hash: [u8; 20],
+    pub piece_len: i64,
+    pub num_pieces: usize,
+    pub pieces: Vec<u8>,
+    pub files: Vec<FileInfo>,
+}
+
+pub fn get_peers(file_path: String) -> Result<Torrent, Box<dyn Error>> {
     let data = std::fs::read(&file_path).unwrap();
     let mut parser = Parser {
         data: &data,
@@ -15,7 +31,6 @@ pub fn get_peers(file_path: String) -> Result<(Vec<Peer>, [u8;20], i64, usize), 
     };
 
     let _parsed = parser.parse_value();
-    dbg!(&_parsed);
 
     let hash: [u8; 20];
     if let Some((s, e)) = parser.info_range {
@@ -59,12 +74,26 @@ pub fn get_peers(file_path: String) -> Result<(Vec<Peer>, [u8;20], i64, usize), 
     let left;
     let piece_len;
     let num_pieces;
+    let pieces;
+    let mut files_list = Vec::new();
     match get_value(&_parsed, "info".to_string()) {
         Some(info) => {
             match get_value(&info, "length".to_string()) {
                 Some(v) => {
                     if let BObject::Int(e) = v {
                         left = e;
+                        match get_value(&info, "name".to_string()) {
+                            Some(BObject::Str(name)) => {
+                                let file_name = String::from_utf8(name).unwrap();
+                                files_list.push(FileInfo {
+                                    name: file_name,
+                                    size: e,
+                                });
+                            }
+                            None | Some(_) => {
+                                panic!("Can't find file name for single file");
+                            }
+                        }
                     } else {
                         panic!("Can't get bytes left")
                     }
@@ -74,10 +103,25 @@ pub fn get_peers(file_path: String) -> Result<(Vec<Peer>, [u8;20], i64, usize), 
                         let mut sum: i64 = 0;
                         if let BObject::List(files) = f {
                             for file in files {
-                                if let BObject::Dict(v) = file
-                                    && let BObject::Int(len) = v[0].1
-                                {
-                                    sum += len;
+                                if let BObject::Dict(v) = file {
+                                    let mut size = 0;
+                                    let mut file_name = String::from("");
+                                    if let BObject::Int(len) = v[0].1 {
+                                        sum += len;
+                                        size = len;
+                                    }
+                                    if let BObject::List(names) = &v[1].1 {
+                                        for name in names {
+                                            if let BObject::Str(n) = name {
+                                                file_name += str::from_utf8(n).unwrap();
+                                                file_name += "/";
+                                            }
+                                        }
+                                    }
+                                    files_list.push(FileInfo {
+                                        name: file_name.trim_matches('/').to_string(),
+                                        size,
+                                    });
                                 }
                             }
                         }
@@ -100,6 +144,7 @@ pub fn get_peers(file_path: String) -> Result<(Vec<Peer>, [u8;20], i64, usize), 
                 Some(v) => {
                     if let BObject::Str(e) = v {
                         num_pieces = e.len().div_ceil(20);
+                        pieces = e;
                     } else {
                         panic!("Can't get number of pieces")
                     }
@@ -135,28 +180,35 @@ pub fn get_peers(file_path: String) -> Result<(Vec<Peer>, [u8;20], i64, usize), 
 
         if url.to_string().starts_with("http") {
             match request_peers_http(&full_url) {
-                Ok(peers) => return Ok((peers, hash, piece_len, num_pieces)),
+                Ok(peers) => {
+                    return Ok(Torrent {
+                        peers,
+                        info_hash: hash,
+                        piece_len,
+                        num_pieces,
+                        pieces,
+                        files: files_list,
+                    });
+                }
                 Err(e) => eprintln!("Error(http): {e}"),
             }
         } else if url.starts_with("udp:") {
             match request_peers_udp(&url, &hash, &peer_id, left, port) {
-                Ok(peers) => return Ok((peers, hash, piece_len, num_pieces)),
+                Ok(peers) => {
+                    return Ok(Torrent {
+                        peers,
+                        info_hash: hash,
+                        piece_len,
+                        num_pieces,
+                        pieces,
+                        files: files_list,
+                    });
+                }
                 Err(e) => eprintln!("Error(udp): {e}"),
             }
         }
     }
     Err("Can't get peers from any tracker".into())
-}
-
-fn compute_info_hash(data: &[u8]) -> [u8; 20] {
-    let mut hasher = Sha1::new();
-    hasher.update(data);
-
-    // This returns GenericArray<u8, 20>
-    let result = hasher.finalize();
-
-    // Convert to [u8; 20]
-    result.into()
 }
 
 pub fn gen_peer_id() -> [u8; 20] {

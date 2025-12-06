@@ -1,12 +1,79 @@
+use sha1::{Digest, Sha1};
 use std::{
     io::{Read, Write},
-    net::TcpStream,
+    net::{SocketAddr, TcpStream},
     time::Duration,
 };
 
-use crate::tracker::gen_peer_id;
+#[allow(dead_code)]
+pub struct PeerConnection {
+    pub ip: String,
+    pub port: u16,
+    pub socket: TcpStream,
+    pub bitfield: Vec<bool>,
+}
 
-fn read_message(socket: &mut TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
+pub fn intitalize_peer_connections(
+    peers: &[Peer],
+    info_hash: &[u8; 20],
+) -> Result<Vec<PeerConnection>, String> {
+    let mut valid_peers = Vec::new();
+    for peer in peers {
+        println!("Trying peer {}", peer.ip);
+        let addr: SocketAddr = format!("{}:{}", peer.ip, peer.port).parse().unwrap();
+        let mut socket = match TcpStream::connect_timeout(&addr, Duration::new(5, 0)) {
+            Ok(soc) => soc,
+            Err(_) => {
+                continue;
+            }
+        };
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let peer_id = gen_peer_id();
+
+        match handshake(&mut socket, info_hash, &peer_id) {
+            Ok(_) => {}
+            Err(_) => continue,
+        };
+        // println!("Handshake successful");
+
+        let has_pieces = match read_bitfield(&mut socket) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        // println!("Bitfield successful");
+
+        match interested(&mut socket) {
+            Ok(_) => {}
+            Err(_) => continue,
+        };
+        // println!("Interested successful");
+
+        match read_unchoke(&mut socket) {
+            Ok(_) => {}
+            Err(_) => continue,
+        };
+        // println!("Unchoke successful");
+
+        valid_peers.push(PeerConnection {
+            ip: peer.ip.clone(),
+            port: peer.port,
+            socket,
+            bitfield: has_pieces,
+        });
+        println!("Got peer {}", peer.ip);
+    }
+    Ok(valid_peers)
+}
+
+use crate::{network::Peer, tracker::gen_peer_id};
+
+fn read_message_non_block(socket: &mut TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
     let mut len_buf = [0u8; 4];
     socket.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf);
@@ -25,6 +92,24 @@ fn read_message(socket: &mut TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
     Ok((msg_id, payload))
 }
 
+fn read_message(socket: &mut TcpStream) -> Result<(u8, Vec<u8>), String> {
+    let mut retry = 0;
+    loop {
+        match read_message_non_block(socket) {
+            Ok((msg_id, payload)) => return Ok((msg_id, payload)),
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                retry += 1;
+                std::thread::sleep(Duration::from_millis(50));
+                if retry > 1 {
+                    return Err(format!("Failed reading message: {e}"));
+                }
+                continue;
+            }
+            Err(e) => return Err(format!("Failed reading message: {e}")),
+        }
+    }
+}
+
 fn interested(socket: &mut TcpStream) -> Result<(), String> {
     let msg_len: [u8; 4] = [0, 0, 0, 1];
     let msg = 2;
@@ -39,9 +124,10 @@ fn interested(socket: &mut TcpStream) -> Result<(), String> {
         && msg_id != 1
     {
         return Err("Did not get unchoke packet back".into());
-    } 
+    }
     Ok(())
 }
+
 fn handshake(
     socket: &mut TcpStream,
     info_hash: &[u8; 20],
@@ -71,7 +157,6 @@ fn handshake(
     } else if &packet[1..20] != pstr {
         return Err("BitTorrent protocol missing from packet".to_string());
     } else if packet[20..28] != reserved {
-        println!("Reserved bits not correct");
         // return Err("Reserved bits not correct".to_string());
     } else if &packet[28..48] != info_hash {
         return Err("Wrong info_hash returned from peer".to_string());
@@ -82,48 +167,109 @@ fn handshake(
     Ok(())
 }
 
-pub fn get_piece_from_peer(
-    ip: String,
-    port: u16,
-    info_hash: &[u8; 20],
-    piece_len: i64,
-    piece_index: usize,
-) -> Result<(), String> {
-    let mut socket = TcpStream::connect(format!("{}:{}", ip, port)).unwrap();
-    socket.set_write_timeout(Some(Duration::new(5, 0))).unwrap();
-    socket.set_read_timeout(Some(Duration::new(5, 0))).unwrap();
-    let peer_id = gen_peer_id();
-
-    handshake(&mut socket, info_hash, &peer_id)?;
-
-    let mut msg_len = [0u8; 4];
-    socket.read_exact(&mut msg_len).unwrap();
-    let len = u32::from_be_bytes(msg_len);
-
-    let mut bitfield_msg = vec![0u8; len as usize];
-    socket.read_exact(&mut bitfield_msg).unwrap();
-
-    let tag = bitfield_msg[0];
-    if tag != 5 {
-        return Err("Did not get a bitfield message from peer".into());
+fn read_bitfield(socket: &mut TcpStream) -> Result<Vec<bool>, String> {
+    if let Ok((tag, bitfield_msg)) = read_message(socket) {
+        if tag != 5 {
+            return Err("Did not get a bitfield message from peer".into());
+        }
+        return Ok(parse_bitfield(&bitfield_msg[1..]));
     }
-    let pieces = parse_bitfield(&bitfield_msg[1..]);
+    Err("Unable to read bitfield message".into())
+}
 
-    if !pieces.contains(&piece_index) {
-        return Err("Piece not with peer".into());
-    }
-
-    match interested(&mut socket) {
-        Ok(_) => {}
+fn read_unchoke(socket: &mut TcpStream) -> Result<(), String> {
+    let (unchoke_msg_id, _unchoke_payload) = match read_message(socket) {
+        Ok(p) => p,
         Err(e) => {
-            println!("Error while setting interested: {e}");
+            return Err(format!("Error while reciving unchoke message: {e}"));
         }
     };
 
+    if unchoke_msg_id != 1 {
+        return Err(format!("Did not recive unchoke, got {unchoke_msg_id}"));
+    }
+    Ok(())
+}
+
+pub fn get_piece_from_peer(
+    piece_index: usize,
+    piece_len: usize,
+    pieces: &[u8],
+    peer: &mut PeerConnection,
+) -> Result<Vec<u8>, String> {
+    let block_len = 16 * 1024;
+
+    if peer.bitfield[piece_index] {
+        println!("Requesting piece {piece_index}");
+
+        let piece_size = piece_len;
+        let mut piece_buf = vec![0u8; piece_size];
+
+        let mut offset = 0;
+
+        while offset < piece_size {
+            let len = std::cmp::min(block_len, piece_size - offset);
+
+            send_request(
+                &mut peer.socket,
+                piece_index as u32,
+                offset as u32,
+                len as u32,
+            )
+            .unwrap();
+
+            let (msg_id, payload) = match read_message(&mut peer.socket) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Err(format!("Unable to read piece message: {e}"));
+                }
+            };
+
+            if msg_id == 7 {
+                let _index = u32::from_be_bytes(payload[0..4].try_into().unwrap());
+                let begin = u32::from_be_bytes(payload[4..8].try_into().unwrap());
+                let block = payload[8..].to_vec();
+                piece_buf[begin as usize..begin as usize + block.len()].copy_from_slice(&block);
+            } else if msg_id == 0 {
+                println!("Health check/Choke");
+                continue;
+            } else {
+                return Err(format!("Did not recive piece message, got {msg_id}"));
+            }
+
+            offset += len;
+        }
+
+        if verify_hash(&piece_buf, piece_index, pieces) {
+            println!("Piece {} passed hash check", piece_index);
+            return Ok(piece_buf);
+        } else {
+            println!("Piece {} failed hash check", piece_index);
+        }
+    }
+
     // send_request(&mut socket, piece_id, 0, 50);
 
+    Err("Unable to get piece from peer".into())
+}
 
-    Ok(())
+pub fn verify_hash(
+    piece_buf: &[u8],
+    piece_index: usize,
+    pieces_field: &[u8], // concatenated 20-byte piece hashes from .torrent metadata
+) -> bool {
+    // Expected hash from .torrent (20 bytes per piece)
+    let start = piece_index * 20;
+    let end = start + 20;
+    let expected_hash = &pieces_field[start..end];
+
+    // Compute SHA-1 for downloaded piece
+    let mut hasher = Sha1::new();
+    hasher.update(piece_buf);
+    let result = hasher.finalize();
+
+    // Compare digest
+    result[..] == expected_hash[..]
 }
 
 fn send_request(
@@ -143,13 +289,14 @@ fn send_request(
     Ok(())
 }
 
-fn parse_bitfield(payload: &[u8]) -> Vec<usize> {
+fn parse_bitfield(payload: &[u8]) -> Vec<bool> {
     let mut pieces = Vec::new();
-    for (byte_index, byte) in payload.iter().enumerate() {
+    for byte in payload.iter() {
         for bit in 0..8 {
             if byte & (1 << (7 - bit)) != 0 {
-                let piece_index = byte_index * 8 + bit;
-                pieces.push(piece_index);
+                pieces.push(true);
+            } else {
+                pieces.push(false);
             }
         }
     }
