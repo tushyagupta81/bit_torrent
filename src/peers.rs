@@ -37,67 +37,65 @@ pub fn intitalize_peer_connections(
 
     let mut handles = Vec::new();
 
-    for (i, peer) in peers.iter().enumerate() {
-        println!("Trying peer ({i}/{}) {}", peers.len(), peer.ip);
-        let addr: SocketAddr = format!("{}:{}", peer.ip, peer.port).parse().unwrap();
-        let mut socket = match TcpStream::connect_timeout(&addr, Duration::new(5, 0)) {
-            Ok(soc) => soc,
-            Err(_) => {
-                continue;
-            }
-        };
-        socket
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        socket
-            .set_write_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-
-        let peer_id = gen_peer_id();
-
-        if handshake(&mut socket, info_hash, &peer_id).is_err() {
-            continue;
-        }
-        // println!("Handshake successful");
-
-        let has_pieces = match read_bitfield(&mut socket) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        // println!("Bitfield successful");
-
-        if interested(&mut socket).is_err() {
-            continue;
-        }
-        // println!("Interested successful");
-
-        if read_unchoke(&mut socket).is_err() {
-            continue;
-        }
-        // println!("Unchoke successful");
-
+    for peer in peers.iter() {
         let pieces_done_clone = Arc::clone(&pieces_done);
         let file_handles_clone = file_handles.to_vec(); // Arc inside handles is fine
         let piece_len = torrent.piece_len as usize;
         let pieces_clone = torrent.pieces.clone();
         let total_pieces = torrent.num_pieces;
+        let hash_clone = *info_hash;
 
         // clone peer data for the thread
         let ip_clone = peer.ip.clone();
         let port_clone = peer.port;
-        let bitfield_clone = has_pieces.clone();
-
-        println!("Got peer {}", peer.ip);
+        let _total_peers = peers.len();
 
         // spawn thread and catch panics
         let handle = thread::spawn(move || {
+            let addr: SocketAddr = format!("{}:{}", ip_clone, port_clone).parse().unwrap();
+            let mut socket = match TcpStream::connect_timeout(&addr, Duration::new(5, 0)) {
+                Ok(soc) => soc,
+                Err(_) => {
+                    return;
+                }
+            };
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+
+            let peer_id = gen_peer_id();
+
+            if handshake(&mut socket, &hash_clone, &peer_id).is_err() {
+                return;
+            }
+            // println!("Handshake successful");
+
+            let has_pieces = match read_bitfield(&mut socket) {
+                Ok(r) => r,
+                Err(_) => return,
+            };
+            // println!("Bitfield successful");
+
+            if interested(&mut socket).is_err() {
+                return;
+            }
+            // println!("Interested successful");
+
+            if read_unchoke(&mut socket).is_err() {
+                return;
+            }
             let ip_for_panic = ip_clone.clone();
+
+            println!("Got peer {}", ip_clone);
             let result = std::panic::catch_unwind(move || {
                 let mut peer_conn = PeerConnection {
                     ip: ip_clone.clone(),
                     port: port_clone,
                     socket, // moved in
-                    bitfield: bitfield_clone,
+                    bitfield: has_pieces,
                 };
 
                 let mut old = None;
@@ -110,25 +108,29 @@ pub fn intitalize_peer_connections(
                     }
                     // Step 1: reserve piece
                     let piece_index_opt = {
-                        let mut pd = pieces_done_clone.write().unwrap();
-                        let idx = pd
-                            .iter()
+                        let pd = pieces_done_clone.read().unwrap();
+                        pd.iter()
                             .enumerate()
-                            .find(|(i, piece_state)| {
-                                (**piece_state) == PieceState::Free
-                                    && peer_conn.bitfield.get(*i).copied().unwrap_or(false)
+                            .find(|(i, state)| {
+                                let has_piece =
+                                    peer_conn.bitfield.get(*i).copied().unwrap_or(false);
+                                **state == PieceState::Free
+                                    && has_piece
                                     && (old.is_none() || *i != old.unwrap())
                             })
-                            .map(|(i, _)| i);
-                        if let Some(i) = idx {
-                            pd[i] = PieceState::Reserved;
-                        } // reserve immediately
-                        idx
+                            .map(|(i, _)| i)
                     };
 
                     if let Some(piece_index) = piece_index_opt {
-                        // println!("Trying for piece {}", piece_index);
-                        // Step 2: download piece outside lock
+                        {
+                            let mut pd = pieces_done_clone.write().unwrap();
+                            if pd[piece_index] == PieceState::Free {
+                                pd[piece_index] = PieceState::Reserved;
+                            } else {
+                                continue; // another thread grabbed it
+                            }
+                        }
+
                         match get_piece_from_peer(
                             piece_index,
                             piece_len,
@@ -143,24 +145,29 @@ pub fn intitalize_peer_connections(
                                     &piece_buf,
                                 ) {
                                     eprintln!("Failed writing piece {}: {}", piece_index, e);
-                                    let mut pd = pieces_done_clone.write().unwrap();
-                                    pd[piece_index] = PieceState::Free; // release reservation
+                                    {
+                                        let mut pd = pieces_done_clone.write().unwrap();
+                                        pd[piece_index] = PieceState::Free; // release reservation
+                                    }
                                     continue;
                                 }
+
                                 println!(
                                     "\t\t\t\t\tPeer {} finished piece {}/{}",
                                     peer_conn.ip,
                                     piece_index + 1,
                                     total_pieces
                                 );
-                                match send_have(&mut peer_conn.socket, piece_index as u32) {
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        eprintln!("Failed to send have: {e}");
-                                    }
-                                };
-                                let mut pd = pieces_done_clone.write().unwrap();
-                                pd[piece_index] = PieceState::Done;
+
+                                if let Err(e) = send_have(&mut peer_conn.socket, piece_index as u32)
+                                {
+                                    eprintln!("Failed to send have: {e}");
+                                }
+
+                                {
+                                    let mut pd = pieces_done_clone.write().unwrap();
+                                    pd[piece_index] = PieceState::Done;
+                                }
                             }
                             Err(e) => {
                                 eprintln!(
@@ -170,24 +177,27 @@ pub fn intitalize_peer_connections(
                                     total_pieces,
                                     e
                                 );
-                                let mut pd = pieces_done_clone.write().unwrap();
-                                pd[piece_index] = PieceState::Free; // release reservation
+                                {
+                                    let mut pd = pieces_done_clone.write().unwrap();
+                                    pd[piece_index] = PieceState::Free; // release reservation
+                                }
                                 old = Some(piece_index);
                                 retry += 1;
                                 continue;
                             }
                         }
                     } else {
-                        // check if all pieces are done
+                        // wait if no piece available, retry until all done
                         let all_done = {
-                            let pd = pieces_done_clone.read().unwrap();
-                            pd.iter().all(|state| *state == PieceState::Done)
+                            {
+                                let pd = pieces_done_clone.read().unwrap();
+                                pd.iter().all(|&x| x == PieceState::Done)
+                            }
                         };
                         if all_done {
-                            break; // nothing left globally
+                            break;
                         } else {
-                            // wait a bit and retry
-                            thread::sleep(Duration::from_millis(200));
+                            thread::sleep(Duration::from_secs(5));
                             continue;
                         }
                     }
@@ -240,7 +250,7 @@ fn read_message(socket: &mut TcpStream) -> Result<(u8, Vec<u8>), String> {
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 retry += 1;
                 thread::sleep(Duration::from_millis(50));
-                if retry > 1 {
+                if retry > 5 {
                     return Err(format!("Failed reading message: {e}"));
                 }
                 continue;
@@ -322,7 +332,7 @@ fn read_bitfield(socket: &mut TcpStream) -> Result<Vec<bool>, String> {
         if tag != 5 {
             return Err("Did not get a bitfield message from peer".into());
         }
-        return Ok(parse_bitfield(&bitfield_msg[1..]));
+        return Ok(parse_bitfield(&bitfield_msg));
     }
     Err("Unable to read bitfield message".into())
 }
