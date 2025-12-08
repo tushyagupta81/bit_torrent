@@ -20,15 +20,25 @@ pub struct PeerConnection {
     pub bitfield: Vec<bool>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PieceState {
+    Free,
+    Done,
+    Reserved,
+}
+
 pub fn intitalize_peer_connections(
     torrent: &Torrent,
     file_handles: &[FileHandle],
 ) -> Result<(), String> {
     let peers = &torrent.peers;
     let info_hash = &torrent.info_hash;
-    let pieces_done = Arc::new(RwLock::new(vec![false; torrent.num_pieces]));
-    for peer in peers {
-        println!("Trying peer {}", peer.ip);
+    let pieces_done = Arc::new(RwLock::new(vec![PieceState::Free; torrent.num_pieces]));
+
+    let mut handles = Vec::new();
+
+    for (i, peer) in peers.iter().enumerate() {
+        println!("Trying peer ({i}/{}) {}", peers.len(), peer.ip);
         let addr: SocketAddr = format!("{}:{}", peer.ip, peer.port).parse().unwrap();
         let mut socket = match TcpStream::connect_timeout(&addr, Duration::new(5, 0)) {
             Ok(soc) => soc,
@@ -80,7 +90,7 @@ pub fn intitalize_peer_connections(
         println!("Got peer {}", peer.ip);
 
         // spawn thread and catch panics
-        let _handle = thread::spawn(move || {
+        let handle = thread::spawn(move || {
             let ip_for_panic = ip_clone.clone();
             let result = std::panic::catch_unwind(move || {
                 let mut peer_conn = PeerConnection {
@@ -104,14 +114,14 @@ pub fn intitalize_peer_connections(
                         let idx = pd
                             .iter()
                             .enumerate()
-                            .find(|(i, done)| {
-                                !**done
+                            .find(|(i, piece_state)| {
+                                (**piece_state) == PieceState::Free
                                     && peer_conn.bitfield.get(*i).copied().unwrap_or(false)
                                     && (old.is_none() || *i != old.unwrap())
                             })
                             .map(|(i, _)| i);
                         if let Some(i) = idx {
-                            pd[i] = true;
+                            pd[i] = PieceState::Reserved;
                         } // reserve immediately
                         idx
                     };
@@ -134,7 +144,7 @@ pub fn intitalize_peer_connections(
                                 ) {
                                     eprintln!("Failed writing piece {}: {}", piece_index, e);
                                     let mut pd = pieces_done_clone.write().unwrap();
-                                    pd[piece_index] = false; // release reservation
+                                    pd[piece_index] = PieceState::Free; // release reservation
                                     continue;
                                 }
                                 println!(
@@ -143,6 +153,14 @@ pub fn intitalize_peer_connections(
                                     piece_index + 1,
                                     total_pieces
                                 );
+                                match send_have(&mut peer_conn.socket, piece_index as u32) {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        eprintln!("Failed to send have: {e}");
+                                    }
+                                };
+                                let mut pd = pieces_done_clone.write().unwrap();
+                                pd[piece_index] = PieceState::Done;
                             }
                             Err(e) => {
                                 eprintln!(
@@ -153,14 +171,25 @@ pub fn intitalize_peer_connections(
                                     e
                                 );
                                 let mut pd = pieces_done_clone.write().unwrap();
-                                pd[piece_index] = false; // release reservation
+                                pd[piece_index] = PieceState::Free; // release reservation
                                 old = Some(piece_index);
                                 retry += 1;
                                 continue;
                             }
                         }
                     } else {
-                        break; // no more pieces for this peer
+                        // check if all pieces are done
+                        let all_done = {
+                            let pd = pieces_done_clone.read().unwrap();
+                            pd.iter().all(|state| *state == PieceState::Done)
+                        };
+                        if all_done {
+                            break; // nothing left globally
+                        } else {
+                            // wait a bit and retry
+                            thread::sleep(Duration::from_millis(200));
+                            continue;
+                        }
                     }
                 }
             });
@@ -169,7 +198,18 @@ pub fn intitalize_peer_connections(
                 eprintln!("Thread for peer {} panicked: {:?}", ip_for_panic, err);
             }
         });
+        handles.push(handle);
     }
+
+    for handle in handles {
+        match handle.join() {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("Error in thread: {:?}", e);
+            }
+        };
+    }
+
     Ok(())
 }
 
@@ -225,6 +265,16 @@ fn interested(socket: &mut TcpStream) -> Result<(), String> {
     {
         return Err("Did not get unchoke packet back".into());
     }
+    Ok(())
+}
+
+fn send_have(socket: &mut TcpStream, piece_index: u32) -> std::io::Result<()> {
+    let mut buf = [0u8; 9];
+    buf[0..4].copy_from_slice(&5u32.to_be_bytes());
+    buf[4] = 4;
+    buf[5..9].copy_from_slice(&piece_index.to_be_bytes());
+
+    socket.write_all(&buf)?;
     Ok(())
 }
 
