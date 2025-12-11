@@ -1,3 +1,3 @@
 [workspace]
-members = ["bit_torrent_sync", "bit_torrent_async"]
+members = ["sync_torrent", "async_torrent"]
 resolver = "3"

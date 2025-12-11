@@ -1,5 +1,5 @@
 [package]
-name = "bit_torrent_sync"
+name = "sync_torrent"
 version = "0.1.0"
 edition = "2024"
 
