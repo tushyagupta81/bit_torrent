@@ -16,7 +16,7 @@ pub async fn get_peers(
     downloaded: u64,
     uploaded: u64,
     num_want: u32,
-) -> Result<Peers, Box<dyn Error>> {
+) -> Result<Peers, Box<dyn Error + Send+Sync>> {
     let tracker_addr = tracker_url
         .trim_start_matches("udp://")
         .trim_end_matches("/announce");

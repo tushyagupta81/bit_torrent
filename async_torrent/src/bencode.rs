@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_bencoded::from_bytes;
 use serde_bytes::ByteBuf;
 
-pub fn decode_bencode(path: String) -> Result<MetaInfo, Box<dyn std::error::Error>> {
+pub fn decode_bencode(path: String) -> Result<MetaInfo, Box<dyn std::error::Error + Sync + Send>> {
     let bytes = std::fs::read(&path).unwrap();
     let info: MetaInfo = from_bytes(&bytes)?;
     // println!("announce: {}", info.announce);
