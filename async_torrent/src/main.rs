@@ -7,11 +7,13 @@ use crate::{
 };
 
 mod bencode;
+mod central_manager;
 mod files;
 mod network;
 mod peers;
 mod tracker;
 mod utils;
+mod peers_task;
 
 #[tokio::main]
 async fn main() {
