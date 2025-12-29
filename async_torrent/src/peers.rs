@@ -361,7 +361,7 @@ async fn handshake(
 
     socket.write_all(&packet).await?;
 
-    let mut resp = [0u8;68];
+    let mut resp = [0u8; 68];
     // println!("Handshake sent     {:?}", &packet);
     if let Err(err) = socket.read_exact(&mut resp).await {
         return Err(format!("failed reading handshake: {err}").into());
