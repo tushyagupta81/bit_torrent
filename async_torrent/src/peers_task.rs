@@ -9,7 +9,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::{mpsc, oneshot},
-    time::timeout,
+    time::{sleep, timeout},
 };
 
 type AsyncError = Box<dyn Error + Send + Sync>;
@@ -21,7 +21,7 @@ const BLOCK_LEN: u32 = 16 * 1024;
 
 use crate::{
     bencode::{FileMode, Info, MetaInfo},
-    central_manager::PieceCommands,
+    central_manager::{PieceCommands, PieceState},
     utils::{gen_peer_id, sha1_hash},
 };
 
@@ -31,9 +31,9 @@ pub struct Peer {
     num_pieces: usize,
     info_hash: [u8; 20],
     socket: TcpStream,
-    peer_id: [u8; 20],
+    pub peer_id: [u8; 20],
     total_size: u64,
-    sender: mpsc::Sender<PieceCommands>,
+    pub sender: mpsc::Sender<PieceCommands>,
     // oneshot_receiver: oneshot::Receiver<Option<usize>>,
     // oneshot_sender: oneshot::Sender<Option<usize>>,
     bitfield: Vec<bool>,
@@ -145,10 +145,13 @@ impl Peer {
         let unchoke_future = self.read_until_type(MsgType::Unchoke);
         let _ = timeout(Duration::from_secs(CHOKE_TIMEOUT), unchoke_future).await??;
 
-        self.sender.send(PieceCommands::PeerUnchoke(self.peer_id)).await?;
+        self.sender
+            .send(PieceCommands::PeerUnchoke(self.peer_id))
+            .await?;
 
-        println!("Got peer {}", self.address);
+        // println!("Got peer {}", self.address);
 
+        let mut first_try = true;
         loop {
             if self.outstanding.len() == 0 {
                 let mut got_one = false;
@@ -182,7 +185,12 @@ impl Peer {
                     }
                 }
                 if !got_one {
-                    break;
+                    if !first_try {
+                        break;
+                    } else {
+                        first_try = false;
+                        sleep(Duration::from_secs(10)).await;
+                    }
                 }
             } else {
                 let (msg_type, payload) = self.read_message().await?;
@@ -255,7 +263,25 @@ impl Peer {
                                     let begin = i as u32 * BLOCK_LEN;
                                     let remaining = piece.data.len() as u32 - begin;
                                     let req_len = remaining.min(BLOCK_LEN);
-                                    self.send_request(index, begin, req_len).await?;
+                                    let (oneshot_sender, oneshot_receiver) = oneshot::channel();
+                                    self.sender
+                                        .send(PieceCommands::RequestPieceStatus(
+                                            index as usize,
+                                            oneshot_sender,
+                                        ))
+                                        .await?;
+                                    if let Some(piece_stat) = oneshot_receiver.await? {
+                                        if piece_stat != PieceState::Done {
+                                            self.send_request(index, begin, req_len).await?;
+                                        } else {
+                                            let _ =
+                                                self.outstanding.remove_entry(&(index as usize));
+                                            self.send_cancel(index, begin, req_len).await?;
+                                        }
+                                    } else {
+                                        let _ = self.outstanding.remove_entry(&(index as usize));
+                                        self.send_cancel(index, begin, req_len).await?;
+                                    }
                                 }
                             }
                         }
@@ -284,6 +310,23 @@ impl Peer {
         let mut msg = Vec::with_capacity(17);
         msg.extend(&(13u32.to_be_bytes())); // length
         msg.push(6u8); // message ID = request
+        msg.extend(&piece_index.to_be_bytes());
+        msg.extend(&begin.to_be_bytes());
+        msg.extend(&block_len.to_be_bytes());
+
+        self.socket.write_all(&msg).await?;
+        Ok(())
+    }
+
+    async fn send_cancel(
+        &mut self,
+        piece_index: u32,
+        begin: u32,
+        block_len: u32,
+    ) -> Result<(), AsyncError> {
+        let mut msg = Vec::with_capacity(17);
+        msg.extend(&(13u32.to_be_bytes())); // length
+        msg.push(8u8); // message ID = cancel
         msg.extend(&piece_index.to_be_bytes());
         msg.extend(&begin.to_be_bytes());
         msg.extend(&block_len.to_be_bytes());

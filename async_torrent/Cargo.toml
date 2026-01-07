@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 bytesize = { version = "2.3.1", features = [ "arbitrary", "serde" ] }
 rand = "0.9.2"
+ratatui = "0.30.0"
 reqwest = { version = "0.12.24" }
 serde = "1.0.228"
 serde_bencoded = "0.3.2"

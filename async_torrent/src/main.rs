@@ -19,9 +19,9 @@ mod utils;
 #[tokio::main]
 async fn main() {
     // let info = decode_bencode("../torrents/one-piece.torrent".to_string()).unwrap();
-    let info = decode_bencode("../torrents/big-buck-bunny.torrent".to_string()).unwrap();
+    // let info = decode_bencode("../torrents/big-buck-bunny.torrent".to_string()).unwrap();
     // let info = decode_bencode("../torrents/small.torrent".to_string()).unwrap();
-    // let info = decode_bencode("../torrents/wired-cd.torrent".to_string()).unwrap();
+    let info = decode_bencode("../torrents/wired-cd.torrent".to_string()).unwrap();
     // let info = decode_bencode("../torrents/test.torrent".to_string()).unwrap();
 
     match initialize_files(&info.info) {
@@ -57,9 +57,10 @@ async fn main() {
                 match peer_str.start().await {
                     Ok(_) => {}
                     Err(e) => {
-                        println!("Error {e}");
+                        eprintln!("Error {e}");
                     }
                 }
+                let _ = peer_str.sender.send(central_manager::PieceCommands::PeerDead(peer_str.peer_id)).await;
             }
         });
     }
