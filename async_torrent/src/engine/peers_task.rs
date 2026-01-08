@@ -21,24 +21,26 @@ const BLOCK_LEN: u32 = 16 * 1024;
 
 use crate::{
     bencode::{FileMode, Info, MetaInfo},
-    central_manager::{PieceCommands, PieceState},
+    engine::{
+        central_manager::{PieceCommands, PieceState},
+        events::UiEvent,
+    },
     utils::{gen_peer_id, sha1_hash},
 };
 
+#[allow(unused)]
 pub struct Peer {
     address: SocketAddrV4,
     info: Arc<MetaInfo>,
     num_pieces: usize,
     info_hash: [u8; 20],
     socket: TcpStream,
-    pub peer_id: [u8; 20],
     total_size: u64,
-    pub sender: mpsc::Sender<PieceCommands>,
-    // oneshot_receiver: oneshot::Receiver<Option<usize>>,
-    // oneshot_sender: oneshot::Sender<Option<usize>>,
     bitfield: Vec<bool>,
-    // outstanding: Vec<PieceStatus>,
     outstanding: HashMap<usize, PieceStatus>,
+    pub peer_id: [u8; 20],
+    pub sender: mpsc::Sender<PieceCommands>,
+    pub ui_tx: mpsc::Sender<UiEvent>,
 }
 
 struct PieceStatus {
@@ -86,6 +88,7 @@ impl Peer {
         address: SocketAddrV4,
         info: Arc<MetaInfo>,
         tx: mpsc::Sender<PieceCommands>,
+        ui_tx: mpsc::Sender<UiEvent>,
     ) -> Result<Peer, AsyncError> {
         let info_portion = &info.info;
         let raw_hash = to_vec(info_portion)?;
@@ -106,7 +109,13 @@ impl Peer {
 
         tx.send(PieceCommands::PeerRegister(peer_id, num_pieces))
             .await?;
-        // let (oneshot_sender,oneshot_receiver) = oneshot::channel();
+        let _ = ui_tx
+            .send(UiEvent::PeerUpdate {
+                peer_id: String::from_utf8_lossy(&peer_id).to_string(),
+                task: "Trying to connect".to_string(),
+                choked: true,
+            })
+            .await;
         Ok(Peer {
             address,
             info: info.clone(),
@@ -116,11 +125,9 @@ impl Peer {
             peer_id,
             sender: tx,
             total_size: left,
-            // oneshot_receiver,
-            // oneshot_sender,
             bitfield: vec![false; num_pieces],
-            // outstanding: vec![],
             outstanding: HashMap::new(),
+            ui_tx,
         })
     }
 
@@ -148,13 +155,20 @@ impl Peer {
         self.sender
             .send(PieceCommands::PeerUnchoke(self.peer_id))
             .await?;
-
-        // println!("Got peer {}", self.address);
+        let _ = self
+            .ui_tx
+            .send(UiEvent::PeerUpdate {
+                peer_id: String::from_utf8_lossy(&self.peer_id).to_string(),
+                task: "Peer connection established".to_string(),
+                choked: false,
+            })
+            .await;
 
         let mut first_try = true;
         loop {
             if self.outstanding.len() == 0 {
                 let mut got_one = false;
+                let mut req_str = String::from("Requesting index ");
                 for _request in 0..REQUEST_ONCE {
                     let (oneshot_sender, oneshot_receiver) = oneshot::channel();
                     self.sender
@@ -164,6 +178,14 @@ impl Peer {
                         ))
                         .await?;
                     if let Some(index) = oneshot_receiver.await? {
+                        if self
+                            .outstanding
+                            .iter()
+                            .find(|(k, _v)| **k == index)
+                            .is_some()
+                        {
+                            break;
+                        }
                         let piece_len = if index >= self.num_pieces - 1 {
                             self.total_size - index as u64 * self.info.info.piece_length
                         } else {
@@ -179,6 +201,8 @@ impl Peer {
                         );
                         let remaining = std::cmp::min(BLOCK_LEN, piece_len as u32);
                         self.send_request(index as u32, 0, remaining).await?;
+                        req_str += &index.to_string();
+                        req_str += ",";
                         got_one = true;
                     } else {
                         break;
@@ -192,6 +216,14 @@ impl Peer {
                         sleep(Duration::from_secs(10)).await;
                     }
                 }
+                let _ = self
+                    .ui_tx
+                    .send(UiEvent::PeerUpdate {
+                        peer_id: String::from_utf8_lossy(&self.peer_id).to_string(),
+                        task: req_str.trim_end_matches(',').to_string(),
+                        choked: false,
+                    })
+                    .await;
             } else {
                 let (msg_type, payload) = self.read_message().await?;
                 match msg_type {
@@ -213,11 +245,27 @@ impl Peer {
                         self.sender
                             .send(PieceCommands::PeerUnchoke(self.peer_id))
                             .await?;
+                        let _ = self
+                            .ui_tx
+                            .send(UiEvent::PeerUpdate {
+                                peer_id: String::from_utf8_lossy(&self.peer_id).to_string(),
+                                task: "Peer choked".to_string(),
+                                choked: true,
+                            })
+                            .await;
                     }
                     MsgType::Unchoke => {
                         self.sender
                             .send(PieceCommands::PeerUnchoke(self.peer_id))
                             .await?;
+                        let _ = self
+                            .ui_tx
+                            .send(UiEvent::PeerUpdate {
+                                peer_id: String::from_utf8_lossy(&self.peer_id).to_string(),
+                                task: "Peer unchoked".to_string(),
+                                choked: false,
+                            })
+                            .await;
                     }
                     MsgType::Have => {
                         let index = u32::from_be_bytes(payload[0..4].try_into()?);
@@ -272,6 +320,10 @@ impl Peer {
                                         .await?;
                                     if let Some(piece_stat) = oneshot_receiver.await? {
                                         if piece_stat != PieceState::Done {
+                                            let _ = self
+                                                .ui_tx
+                                                .send(UiEvent::PieceDownloading(index as usize))
+                                                .await;
                                             self.send_request(index, begin, req_len).await?;
                                         } else {
                                             let _ =
@@ -296,7 +348,6 @@ impl Peer {
                 };
             }
         }
-        println!("{} finished", String::from_utf8_lossy(&self.peer_id));
 
         Ok(())
     }
@@ -435,22 +486,15 @@ impl Peer {
     }
 }
 
-fn verify_hash(
-    piece_buf: &[u8],
-    piece_index: usize,
-    pieces_field: &[u8], // concatenated 20-byte piece hashes from .torrent metadata
-) -> bool {
-    // Expected hash from .torrent (20 bytes per piece)
+fn verify_hash(piece_buf: &[u8], piece_index: usize, pieces_field: &[u8]) -> bool {
     let start = piece_index * 20;
     let end = start + 20;
     let expected_hash = &pieces_field[start..end];
 
-    // Compute SHA-1 for downloaded piece
     let mut hasher = Sha1::new();
     hasher.update(piece_buf);
     let result = hasher.finalize();
 
-    // Compare digest
     result[..] == expected_hash[..]
 }
 

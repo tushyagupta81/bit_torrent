@@ -3,6 +3,9 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
+use crate::engine::events::UiEvent;
+
+#[allow(unused)]
 #[derive(Debug)]
 struct PeerState {
     choked: bool,
@@ -23,6 +26,7 @@ pub struct CentralManager {
     peers: HashMap<PeerId, PeerState>,
     pieces_status: Vec<PieceState>,
     done_pieces: usize,
+    ui_tx: mpsc::Sender<UiEvent>,
 }
 
 pub type PeerId = [u8; 20];
@@ -41,11 +45,12 @@ pub enum PieceCommands {
 }
 
 impl CentralManager {
-    pub fn new(num_piece: usize) -> CentralManager {
+    pub fn new(num_piece: usize, ui_tx: mpsc::Sender<UiEvent>) -> CentralManager {
         CentralManager {
             peers: HashMap::new(),
             pieces_status: vec![PieceState::Free; num_piece],
             done_pieces: 0,
+            ui_tx,
         }
     }
     pub async fn run(mut self, mut rx: mpsc::Receiver<PieceCommands>) {
@@ -63,9 +68,9 @@ impl CentralManager {
                                     **state != PieceState::Done && peer_info.bitfield[*i]
                                 })
                                 .map(|(i, _)| i);
-                            // if let Some(i) = index {
-                            //     self.pieces_status[i] = PieceState::Reserved(peer_id);
-                            // }
+                            if let Some(i) = index {
+                                let _ = self.ui_tx.send(UiEvent::PieceRequested(i)).await.ok();
+                            }
                             let _ = sender.send(index);
                         } else {
                             let index = self
@@ -78,6 +83,7 @@ impl CentralManager {
                                 .map(|(i, _)| i);
                             if let Some(i) = index {
                                 self.pieces_status[i] = PieceState::Reserved(peer_id);
+                                let _ = self.ui_tx.send(UiEvent::PieceRequested(i)).await.ok();
                             }
                             let _ = sender.send(index);
                         }
@@ -89,11 +95,16 @@ impl CentralManager {
                     let _ = sender.send(self.pieces_status.get(piece_index).cloned());
                 }
                 PieceCommands::PieceDone(_peer_id, piece_index) => {
-                    println!(
-                        "\t\t\t\tPiece {}/{} done",
-                        piece_index + 1,
-                        self.pieces_status.len()
-                    );
+                    // println!(
+                    //     "\t\t\t\tPiece {}/{} done",
+                    //     piece_index + 1,
+                    //     self.pieces_status.len()
+                    // );
+                    let _ = self
+                        .ui_tx
+                        .send(UiEvent::PieceCompleted(piece_index))
+                        .await
+                        .ok();
                     if self.pieces_status[piece_index] != PieceState::Done {
                         self.pieces_status[piece_index] = PieceState::Done;
                         self.done_pieces += 1;

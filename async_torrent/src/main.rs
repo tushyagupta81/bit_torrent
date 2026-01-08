@@ -1,71 +1,36 @@
-use std::sync::Arc;
-
-use tokio::{sync::mpsc, task::JoinSet};
-
-use crate::{
-    bencode::decode_bencode, central_manager::CentralManager, files::initialize_files,
-    peers_task::Peer, tracker::fetch_peers,
-};
-
+mod app;
 mod bencode;
-mod central_manager;
-mod files;
-mod network;
-mod peers;
-mod peers_task;
-mod tracker;
+mod engine;
+mod tui;
 mod utils;
 
+use anyhow;
+use std::env;
+use std::fs::OpenOptions;
+use std::os::unix::io::AsRawFd;
+use std::path::PathBuf;
+
+fn redirect_stderr() {
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("debug.log")
+        .unwrap();
+
+    unsafe {
+        libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO);
+    }
+}
+
 #[tokio::main]
-async fn main() {
-    // let info = decode_bencode("../torrents/one-piece.torrent".to_string()).unwrap();
-    // let info = decode_bencode("../torrents/big-buck-bunny.torrent".to_string()).unwrap();
-    // let info = decode_bencode("../torrents/small.torrent".to_string()).unwrap();
-    let info = decode_bencode("../torrents/wired-cd.torrent".to_string()).unwrap();
-    // let info = decode_bencode("../torrents/test.torrent".to_string()).unwrap();
-
-    match initialize_files(&info.info) {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("Error while initializing files: {e}");
-            return;
-        }
-    };
-
-    let peers = fetch_peers(&info).await.unwrap();
-
-    let central = CentralManager::new(info.info.pieces.len().div_ceil(20) as usize);
-
-    println!("Piece = {}", info.info.pieces.len().div_ceil(20));
-
-    let info_ptr = Arc::new(info);
-
-    let mut join_set = JoinSet::new();
-
-    let (mpsc_sender, mpsc_recevier) = mpsc::channel(100);
-
-    join_set.spawn(async move {
-        central.run(mpsc_recevier).await;
-    });
-
-    for peer in peers.peers.0 {
-        let info_ptr = info_ptr.clone();
-        let sender = mpsc_sender.clone();
-
-        join_set.spawn(async move {
-            if let Ok(mut peer_str) = Peer::new(peer, info_ptr, sender).await {
-                match peer_str.start().await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        eprintln!("Error {e}");
-                    }
-                }
-                let _ = peer_str.sender.send(central_manager::PieceCommands::PeerDead(peer_str.peer_id)).await;
-            }
-        });
+async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        eprintln!("Usage: {} <path_to_torrent>", args[0]);
+        std::process::exit(1);
     }
-
-    while let Some(res) = join_set.join_next().await {
-        res.expect("task panicked");
-    }
+    let torrent_path: PathBuf = PathBuf::from(&args[1]);
+    redirect_stderr();
+    let info = bencode::decode_bencode(torrent_path).unwrap();
+    app::run_tui(info).await
 }

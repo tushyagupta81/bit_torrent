@@ -6,11 +6,12 @@ use tokio::time::timeout;
 
 use crate::{
     bencode::{FileMode, MetaInfo},
-    network,
-    peers::Peers,
+    engine::network,
+    engine::peers::Peers,
     utils::{encode_binary, gen_peer_id, sha1_hash},
 };
 
+#[allow(unused)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct TrackerResponse {
     pub interval: usize,
@@ -44,9 +45,6 @@ pub async fn fetch_peers(info: &MetaInfo) -> Result<TrackerResponse, Box<dyn Err
             }
         }
     }
-    // let piece_len = info.info.piece_length;
-    // let num_pieces = info.info.pieces.len() as u64;
-    // let pieces = info.info.pieces.clone();
     let compact = 1;
     let event = "started";
     let numwant: u32 = 50;
@@ -57,8 +55,8 @@ pub async fn fetch_peers(info: &MetaInfo) -> Result<TrackerResponse, Box<dyn Err
         if tracker.starts_with("http") {
             let query = format!(
                 "info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&compact={}&event={}&numwant={}",
-                encode_binary(&info_hash), // percent-encoded already
-                encode_binary(&peer_id),   // percent-encoded already
+                encode_binary(&info_hash),
+                encode_binary(&peer_id),
                 port,
                 uploaded,
                 downloaded,
@@ -69,24 +67,28 @@ pub async fn fetch_peers(info: &MetaInfo) -> Result<TrackerResponse, Box<dyn Err
             );
             let sep = if tracker.contains("?") { "&" } else { "?" };
             let full_url = format!("{}{}{}", tracker, sep, query,);
-            let peers_bytes =
-                match timeout(Duration::from_secs(timeout_dur), network::http::get_peers(full_url)).await {
-                    Ok(r) => match r {
-                        Ok(r) => r,
-                        Err(e) => {
-                            eprintln!("Failed to get peer(HTTP): {e}");
-                            continue;
-                        }
-                    },
+            let peers_bytes = match timeout(
+                Duration::from_secs(timeout_dur),
+                network::http::get_peers(full_url),
+            )
+            .await
+            {
+                Ok(r) => match r {
+                    Ok(r) => r,
                     Err(e) => {
                         eprintln!("Failed to get peer(HTTP): {e}");
                         continue;
                     }
-                };
+                },
+                Err(e) => {
+                    eprintln!("Failed to get peer(HTTP): {e}");
+                    continue;
+                }
+            };
             let peers: TrackerResponse = match from_bytes(&peers_bytes) {
                 Ok(tr) => tr,
                 Err(e) => {
-                    println!("Error: {e}, in {}", String::from_utf8_lossy(&peers_bytes));
+                    eprintln!("Error: {e}, in {}", String::from_utf8_lossy(&peers_bytes));
                     continue;
                 }
             };

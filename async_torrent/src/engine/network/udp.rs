@@ -5,7 +5,7 @@ use std::{
 
 use tokio::net::UdpSocket;
 
-use crate::peers::Peers;
+use crate::engine::peers::Peers;
 
 pub async fn get_peers(
     tracker_url: String,
@@ -76,7 +76,7 @@ pub async fn get_peers(
     if len < 20 {
         return Err("Response too short".into());
     }
-    let (ann_action, ann_tid, _ann_interval, ann_leechers, ann_seeders) =
+    let (ann_action, ann_tid, _ann_interval, _ann_leechers, ann_seeders) =
         parse_announce_response(&resp[..20])?;
     if ann_seeders == 0 {
         return Err("No seeders".into());
@@ -88,7 +88,7 @@ pub async fn get_peers(
         return Err("Wrong action".into());
     }
 
-    println!("Seeders = {ann_seeders}, Leechers = {ann_leechers}");
+    // println!("Seeders = {ann_seeders}, Leechers = {_ann_leechers}");
 
     let peers = parse_announce_response_peers(&resp[..len])?;
 

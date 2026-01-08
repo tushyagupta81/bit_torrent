@@ -1,8 +1,10 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 use serde_bencoded::from_bytes;
 use serde_bytes::ByteBuf;
 
-pub fn decode_bencode(path: String) -> Result<MetaInfo, Box<dyn std::error::Error + Sync + Send>> {
+pub fn decode_bencode(path: PathBuf) -> Result<MetaInfo, Box<dyn std::error::Error + Sync + Send>> {
     let bytes = std::fs::read(&path).unwrap();
     let info: MetaInfo = from_bytes(&bytes)?;
     // println!("announce: {}", info.announce);
@@ -42,7 +44,7 @@ pub fn decode_bencode(path: String) -> Result<MetaInfo, Box<dyn std::error::Erro
     Ok(info)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Info {
     #[serde(rename = "piece length")]
     pub piece_length: u64,
@@ -52,7 +54,7 @@ pub struct Info {
     pub mode: FileMode,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum FileMode {
     MultipleFiles {
@@ -64,14 +66,14 @@ pub enum FileMode {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct File {
     pub length: u64,
     // pub md5sum: Option<ByteBuf>,
     pub path: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MetaInfo {
     pub info: Info,
     pub announce: String,
